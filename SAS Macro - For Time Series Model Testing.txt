@@ -1,0 +1,248 @@
+/********************* MACRO FOR RVOL MODEL TESTING ******************************/
+/************************ AUTHOR: PRADEEP JEYACHANDRAN***************************/
+
+
+%macro Testing_Std(fulldataset= ,indepv=, depv= , garch_order_p =, garch_order_q = ,lagdep= );
+
+Data full;
+SET &fulldataset (keep = Date &indepv &depv);
+run;
+
+Data full;
+SET full;
+if &depv=. THEN DELETE;
+run;
+
+/***************************************************************************/
+/***********Code for Model Building and OOS(Out of Sample) Testing *********/
+
+/* Assumes we have data until June 2016. Model building is done until
+Dec 2015 and data from Jan 2016 to Jun 2016 is used as testing data */
+
+
+/* Model Building Step*/
+data Y2;
+	set full(where=(date le '30Jun2016'd));
+	/*keep &indep;*/
+run;
+
+proc sql;
+	update Y2
+set &depv=.
+	where date gt '31Dec2015'd;
+quit;
+ods listing close;
+data _null_;
+%if &garch_order_p =0 AND &garch_order_q =0 AND &lagdep=0 %THEN %DO;
+
+proc autoreg data=Y2;
+	model &depv= &indepv /nlag=12 backstep godfrey=12 dwprob method = yw dwprob ldw archtest maxiter = 300;
+	output out=res2 p=yhat2 r=r2 cev=cev2;
+	title 'OOS Model - Standard';
+%END;
+%ELSE %IF &garch_order_p = 0 AND &garch_order_q =0 AND &lagdep=1 %THEN %DO;
+proc autoreg data=Y2;
+	model &depv= &indepv /nlag=12 backstep godfrey=12 LAGDEP=LAG1&depv LAGDV=LAG1&depv dwprob DW=1 ldw method=yw archtest maxiter = 300;
+	output out=res2 p=yhat2 r=r2 cev=cev2;
+	title 'OOS Model- with lagged dependent';
+%END;
+
+%ELSE %IF &garch_order_p=0 AND &garch_order_q ne 0 AND &lagdep=0 %THEN %DO;
+proc autoreg data=Y2;
+	model &depv= &indepv /nlag=12 backstep godfrey=12 garch=(q=&garch_order_q) dwprob method = yw ldw archtest maxiter = 300;
+	output out=res2 p=yhat2 r=r2 cev=cev2;
+	title 'OOS Model - with GARCH q';
+%END;
+
+
+%ELSE %IF &garch_order_p ne 0 AND &garch_order_q = 0 AND &lagdep=0 %THEN %DO;
+proc autoreg data=Y2;
+	model &depv= &indepv /nlag=12 backstep godfrey=12 garch=(p=&garch_order_p) dwprob method = yw ldw archtest maxiter = 300;
+	output out=res2 p=yhat2 r=r2 cev=cev2;
+	title 'OOS Model with GARCH p';
+%END;
+
+%ELSE %IF &garch_order_p ne 0 AND &garch_order_q ne 0 AND &lagdep=0 %THEN %DO;
+proc autoreg data=Y2;
+	model &depv= &indepv /nlag=12 backstep godfrey=12 garch=(p=&garch_order_p, q=&garch_order_q) dwprob method = yw ldw archtest maxiter = 300;
+	output out=res2 p=yhat2 r=r2 cev=cev2;
+	title 'OOS Model- with GARCH(p,q)';
+%END;
+
+%ELSE %IF &garch_order_p ne 0 AND &garch_order_q ne 0 AND &lagdep=1 %THEN %DO;
+proc autoreg data=Y2;
+	model &depv= &indepv /nlag=12 backstep godfrey=12 LAGDEP=LAG1&depv LAGDV = LAG1&depv DW=1 garch=(p=&garch_order_p, q=&garch_order_q) dwprob method=yw archtest ldw maxiter = 300;
+	output out=res2 p=yhat2 r=r2 cev=cev2;
+	title 'OOS Model- with GARCH(p,q) and Lagged Dependent';
+%END;
+
+%ELSE %IF &garch_order_p ne 0 AND &garch_order_q = 0 AND &lagdep=1 %THEN %DO;
+proc autoreg data=Y2;
+	model &depv= &indepv /nlag=12 backstep godfrey=12 LAGDEP=LAG1&depv  LAGDV = LAG1&depv DW=1 garch=(p=&garch_order_p) dwprob method=yw archtest ldw maxiter = 300;
+	output out=res2 p=yhat2 r=r2 cev=cev2;
+	title 'OOS Model- with GARCH(p) and Lagged Dependent';
+%END;
+
+%ELSE %IF &garch_order_p = 0 AND &garch_order_q ne 0 AND &lagdep=1 %THEN %DO;
+proc autoreg data=Y2;
+	model &depv= &indepv /nlag=12 backstep godfrey=12 LAGDEP=LAG1&depv LAGDV = LAG1&depv DW=1 garch=(q=&garch_order_q) dwprob method=yw archtest ldw maxiter = 300;
+	output out=res2 p=yhat2 r=r2 cev=cev2;
+	title 'OOS Model- with GARCH(q) and Lagged Dependent';
+%END;
+
+RUN;
+
+ods listing;
+
+/*****************************************************************************/
+/***TESTING FOR ANY REMAINING ARCH/GARCH EFFECTS USING DISCOUNTED RESIDUALS***/
+
+data _null_;
+%IF &garch_order_p ne 0 OR &garch_order_q ne 0 %THEN %DO;
+
+data arch_test;
+	set res2;
+	disc_res = r2/sqrt(cev2);
+ods listing close;
+proc autoreg data = arch_test;
+	model disc_res= /noint archtest;
+%END;
+run;
+ods listing;
+
+/****************************************************************/
+/* Model Testing - OOS*/
+/* Computing Model Statistics like RMSE, MSE, etc. for backtest*/
+
+Data model_oos_fit2;
+set res2 (drop=&indepv &depv r2);
+set model_fit;
+rename yhat2=Predicted;
+run;
+
+Data model_oos_fit3;
+set model_oos_fit2;
+r2 = (Predicted - Actual);
+Rsq = r2**2;
+Abs_r = abs(r2);
+percent_er= (r2/Actual);
+Abs_per = abs(percent_er);	
+run;
+
+/* Computing Model fit stats */
+
+/* OOS - Development */
+
+Data oostest_dev;
+set model_oos_fit3 (where=(date <='31Dec2015'd));
+keep Actual Predicted;
+Run;
+
+%mae_rmse_sql(oostest_dev,predicted,actual);
+%put NOTE: mae=&mae rmse=&rmse mape=&mape mse=&mse;
+
+data oostest_dev_results;
+mae=&mae; rmse=&rmse; mape=&mape; mse=&mse;
+run;  
+
+/* Computing Model fit stats for validation part*/
+
+/*OOS Test - Validation */
+
+Data oostest_val;
+set model_oos_fit3 (where=(date between '1Jan2016'd and '30Jun2016'd));
+keep Actual Predicted;
+Run;
+
+%mae_rmse_sql(oostest_val,predicted,actual);
+%put NOTE: mae=&mae rmse=&rmse mape=&mape mse=&mse;
+
+data oostest_val_results;
+mae=&mae; rmse=&rmse; mape=&mape; mse=&mse;
+run;  
+
+/* OOS test Development and validation Results combined*/
+
+Data c;
+array Type Development Validation;
+run;
+
+proc transpose data =c out = d (rename= (_NAME_=Type) DROP = COL1); run;
+
+data d;
+Set d;
+LABEL Type = "Type";
+run;
+
+Data OOStest_results_combined;
+set d;
+set oostest_dev_results oostest_val_results;
+run;
+
+/****************************************************************************/
+/*************** Tesing Model Stationarity and Residuals ********************/
+/****************************************************************************/
+
+Data new;
+	SET full (where=(Date le '31Dec2015'd));
+run;
+ 
+data _null_;
+%IF &lagdep=0 %THEN %DO;
+
+PROC VARMAX DATA= new;
+MODEL &depv=  &indepv / P=1 DFTEST PRINT=(ROOTS);OUTPUT out = varmax_results;
+%END;
+
+%ELSE %DO;
+%put 'Varmax has to be run without lagged dependent';
+%END;
+RUN;
+
+/*CHECK RESIDUALS*/
+/*run diagnostics on residuals of model*/
+proc univariate plot normal data = res2;
+var r2;
+run;
+ods listing close;
+proc arima data=res2;
+      identify var=r2 stationarity=(adf=(1,2,3,4,5,6));
+run;
+ods listing;
+
+ods listing close;
+proc reg data=new;
+	model &depv = &indepv /vif dwprob dw;
+run;
+ods listing;
+
+
+/******************************* SAVING EVERYTHING ***************************/
+
+/* Exporting all results Backtesting, OOS and Model fit Results to a csv file with appropriate name assigned*/
+
+proc export data = backtest_results_combined 
+outfile = "C:\Users\......scussion\REBUILD_Testing _Results\&outname.xls"
+dbms = ExcelCS replace; sheet = "Backtest Output";
+
+proc export data = OOStest_results_combined 
+outfile = "C:\Users\......scussion\REBUILD_Testing _Results\&outname.xls"
+dbms = ExcelCS replace;
+sheet = "OOS_Test_Output";
+
+proc export data = Model_fit3  
+outfile = "C:\Users\......scussion\&outname.xls"
+dbms = ExcelCS replace;
+sheet = "Model_fit_backtest";
+
+proc export data = model_oos_fit3 
+outfile = "C:\Users\......scussion\ults\&outname.xls"
+dbms = ExcelCS replace;
+Sheet = "Model_fit_OOS";
+run;
+
+
+%mend Testing_Std;
+
+
+
